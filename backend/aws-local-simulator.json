@@ -1,0 +1,56 @@
+{
+  "services": {
+    "dynamodb": true,
+    "lambda": true,
+    "apigateway": true
+  },
+  "ports": {
+    "dynamodb": 8000,
+    "lambda": 3001,
+    "apigateway": 4567
+  },
+  "apigateway": {
+    "apis": [
+      {
+        "name": "rag-http-api",
+        "description": "Equivalente local da RagHttpApi do template.yaml",
+        "endpoints": [
+          { "path": "/chat", "method": "POST", "lambdaName": "rag-chat-handler" },
+          { "path": "/chat", "method": "OPTIONS", "lambdaName": "rag-chat-handler" }
+        ]
+      }
+    ]
+  },
+  "lambda": {
+    "externalRuntime": {
+      "defaultEndpoint": "http://127.0.0.1:5001/invoke"
+    }
+  },
+  "lambdas": [
+    {
+      "name": "rag-chat-handler",
+      "runtime": "python3.12",
+      "handler": "chat_handler.lambda_handler",
+      "runtimeEndpoint": "http://127.0.0.1:5001/invoke",
+      "timeout": 60,
+      "env": {
+        "TABLE_NAME": "blog-table",
+        "DYNAMODB_ENDPOINT": "http://localhost:8000"
+      }
+    }
+  ],
+  "dynamodb": {
+    "tables": [
+      {
+        "TableName": "blog-table",
+        "KeySchema": [
+          { "AttributeName": "id", "KeyType": "HASH" }
+        ],
+        "AttributeDefinitions": [
+          { "AttributeName": "id", "AttributeType": "S" }
+        ],
+        "BillingMode": "PAY_PER_REQUEST"
+      }
+    ]
+  }
+}

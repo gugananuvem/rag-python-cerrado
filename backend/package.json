@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "start": "node server.js",
+    "simulator": "aws-local-simulator start aws-local-simulator.json",
+    "simulator:stop": "aws-local-simulator stop",
+    "simulator:status": "aws-local-simulator status",
+    "simulator:reset": "aws-local-simulator reset"
+  },
+  "devDependencies": {
+    "@gugananuvem/aws-local-simulator": "^1.0.40"
+  }
+}

@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Sistema RAG Serverless - DynamoDB (vector store) + Bedrock (Titan Embeddings v2 +
+  Claude 3 Sonnet) + Lambda (Python 3.12) + API Gateway HTTP API.
+
+Parameters:
+  TableName:
+    Type: String
+    Default: blog-table
+    Description: Nome da tabela DynamoDB que armazena os posts e seus embeddings.
+  EmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+  ChatModelId:
+    Type: String
+    Default: anthropic.claude-3-sonnet-20240229-v1:0
+  EmbeddingDimensions:
+    Type: Number
+    Default: 1024
+  TopK:
+    Type: Number
+    Default: 3
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 512
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+
+Resources:
+  # --------------------------------------------------------------------------
+  # Tabela DynamoDB (vector store)
+  # --------------------------------------------------------------------------
+  BlogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  # --------------------------------------------------------------------------
+  # HTTP API (API Gateway v2) com CORS liberado
+  # --------------------------------------------------------------------------
+  RagHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowHeaders:
+          - "Content-Type"
+        AllowMethods:
+          - "POST"
+          - "OPTIONS"
+
+  # --------------------------------------------------------------------------
+  # Função Lambda do RAG
+  # --------------------------------------------------------------------------
+  ChatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rag-chat-handler
+      CodeUri: src/
+      Handler: chat_handler.lambda_handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+          EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
+          CHAT_MODEL_ID: !Ref ChatModelId
+          EMBEDDING_DIMENSIONS: !Ref EmbeddingDimensions
+          TOP_K: !Ref TopK
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TableName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}"
+                - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${ChatModelId}"
+      Events:
+        Chat:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RagHttpApi
+            Path: /chat
+            Method: POST
+        ChatOptions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RagHttpApi
+            Path: /chat
+            Method: OPTIONS
+
+Outputs:
+  ApiEndpoint:
+    Description: "Endpoint para o frontend (POST /chat)"
+    Value: !Sub "https://${RagHttpApi}.execute-api.${AWS::Region}.amazonaws.com/chat"
+  TableName:
+    Description: "Nome da tabela DynamoDB"
+    Value: !Ref TableName
+  FunctionName:
+    Description: "Nome da função Lambda"
+    Value: !Ref ChatFunction
