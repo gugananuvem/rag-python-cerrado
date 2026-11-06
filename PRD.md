@@ -32,7 +32,7 @@ Um sistema completo, de baixo custo e 100% Serverless para **Retrieval-Augmented
   │   ├── /src
   │   │   ├── chat_handler.py        # Função Lambda principal do RAG
   │   │   └── requirements.txt       # Dependências (boto3, botocore)
-  │   ├── template.yaml              # Infraestrutura como Código (AWS SAM Template)
+  │   ├── template.yaml              # IaC (SAM): DynamoDB, Lambda, HTTP API, S3 + CloudFront
   │   ├── seed.py                    # Script para popular a base com vetores
   │   ├── package.json               # devDependency + scripts do simulador local
   │   ├── aws-local-simulator.json   # Config do AWS Local Simulator (DynamoDB local)
@@ -98,10 +98,16 @@ Durante o `sam deploy --guided`, informe:
 - **AWS Region**: `us-east-1` (ou a região configurada no Bedrock)
 - Confirme as autorizações de IAM e permissões Padrão.
 
-No final da execução, o SAM exibirá o Output **`ApiEndpoint`**, exemplo:
+No final da execução, o SAM exibirá os Outputs, exemplo:
 ```text
-https://abc123xyz.execute-api.us-east-1.amazonaws.com/chat
+ApiEndpoint            https://abc123xyz.execute-api.us-east-1.amazonaws.com/chat
+FrontendBucketName     rag-dynamodb-stack-frontendbucket-xxxxxxxx
+FrontendDistributionId E1ABCDEF123456
+FrontendUrl            https://d111111abcdef8.cloudfront.net
 ```
+
+O mesmo stack provisiona o bucket S3 privado e a distribuição CloudFront do frontend
+(veja [Deploy do Frontend (S3 + CloudFront)](#4-deploy-do-frontend-s3--cloudfront)).
 
 ---
 
@@ -131,6 +137,43 @@ npm run dev
 Abra o navegador em `http://localhost:3000`.
 
 Clique no ícone de engrenagem ⚙️ no canto superior direito e cole a URL do **ApiEndpoint** gerada no Passo 1.
+
+---
+
+### 4. Deploy do Frontend (S3 + CloudFront)
+
+O frontend é publicado em um bucket **S3 privado** e distribuído globalmente via
+**CloudFront** (HTTPS obrigatório). Ambos são criados pelo `template.yaml`:
+
+| Recurso | Descrição |
+|---------|-----------|
+| `FrontendBucket` | Bucket S3 com acesso público totalmente bloqueado e criptografia AES256. |
+| `FrontendOriginAccessControl` | OAC (SigV4) que permite ao CloudFront assinar as leituras no S3. |
+| `FrontendDistribution` | Distribuição CloudFront (`PriceClass_100`, HTTP/2 e HTTP/3, compressão, `redirect-to-https`, `index.html` como root). |
+| `FrontendBucketPolicy` | Libera `s3:GetObject` somente para a distribuição CloudFront (condição `AWS:SourceArn`). |
+
+O CloudFront devolve `index.html` (200) para erros 403/404, garantindo o fallback de SPA.
+
+Gere o build e publique (na pasta `frontend`, após o `sam deploy`):
+
+```powershell
+npm run build
+
+$stack = "rag-dynamodb-stack"
+$bucket = aws cloudformation describe-stacks --stack-name $stack `
+  --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text
+$distId = aws cloudformation describe-stacks --stack-name $stack `
+  --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text
+
+aws s3 sync dist/ s3://$bucket --delete
+aws cloudfront create-invalidation --distribution-id $distId --paths "/*"
+```
+
+Acesse a URL do Output **`FrontendUrl`**, abra a engrenagem ⚙️ e cole o **`ApiEndpoint`**.
+
+> O CORS da HTTP API permite qualquer origem (`*`), então o domínio do CloudFront
+> funciona sem ajustes. Para restringir, troque `AllowOrigins` no `template.yaml`
+> pela `FrontendUrl`.
 
 ---
 
@@ -272,7 +315,7 @@ unset DYNAMODB_ENDPOINT             # Bash
 4. `npm start` para subir o simulador (DynamoDB em `:8000`, tabela `blog-table` criada, API em `:4567/chat`). Para debugar a Lambda, use `npm run start:debug` e o launch "Backend: Lambda (Python via simulador)".
 5. Definir `AWS_PROFILE=dev`, `DYNAMODB_ENDPOINT=http://localhost:8000`, `AWS_REGION=us-east-1`.
 6. `pip install -r src/requirements.txt && python seed.py` para popular a base.
-7. (Opcional, deploy real) `sam build && sam deploy --guided`.
+7. (Opcional, deploy real) `sam build && sam deploy --guided`, depois `npm run build` no frontend e `aws s3 sync dist/ s3://<FrontendBucketName> --delete` + invalidação CloudFront.
 8. Rodar o frontend (`cd ../frontend && npm install && npm run dev`).
 
 ---
@@ -282,4 +325,5 @@ unset DYNAMODB_ENDPOINT             # Bash
 - **Tratamento de Throttling do Bedrock**: Tanto o `chat_handler.py` quanto o `seed.py` possuem lógica resiliente de **Exponential Backoff com Jitter** para capturar exceções `ThrottlingException` e `TooManyRequestsException`.
 - **Busca Vetorial Nativa no DynamoDB**: o `chat_handler.py` usa a API `SearchVectors` sobre o índice vetorial `embedding-index` (COSINE, 1024 dimensões do Titan Embeddings v2). O `Score` retornado é uma distância (0 = idêntico), convertida para similaridade (`1 - distância`) na resposta. Exige boto3/botocore `>= 1.43.119` e permissão `dynamodb:SearchVectors` no ARN do índice.
 - **Transparência de Fontes**: A resposta da API inclui a lista das fontes mais relevantes do DynamoDB e seus respectivos scores de similaridade.
+- **Frontend Seguro e Global**: bucket S3 privado (sem acesso público) servido apenas via CloudFront com Origin Access Control, HTTPS forçado e fallback de SPA.
 - **Configuração Flexível de CORS**: A HTTP API aceita requisições do frontend React via CloudFront ou localhost.
