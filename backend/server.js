@@ -1,8 +1,15 @@
 const path = require('path');
 const { AWSLocalSimulator } = require('@gugananuvem/aws-local-simulator');
 
-// Aponta para o arquivo de configuração local (serviços, portas, tabelas DynamoDB, etc.)
-const configPath = path.join(__dirname, 'aws-local-simulator.json');
+// Caminhos do config (ex.: codePath: "src") e dos dados são relativos ao cwd.
+// Fixa o cwd na pasta backend para funcionar de qualquer diretório.
+process.chdir(__dirname);
+
+// Arquivo de configuração (serviços, portas, tabelas DynamoDB, lambdas, etc.).
+// Padrão: aws-local-simulator.json (Lambda Python por processo, sem runtime server).
+// Debug:  node server.js aws-local-simulator.debug.json (ver `npm run start:debug`).
+const configPath = path.resolve(__dirname, process.argv[2] || 'aws-local-simulator.json');
+console.log(`Config: ${configPath}`);
 
 const simulator = new AWSLocalSimulator({ configPath });
 

@@ -1,8 +1,8 @@
-AWSTemplateFormatVersion: "2010-09-09"
+﻿AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Sistema RAG Serverless - DynamoDB (vector store) + Bedrock (Titan Embeddings v2 +
-  Claude 3 Sonnet) + Lambda (Python 3.12) + API Gateway HTTP API.
+  Amazon Nova Micro) + Lambda (Python 3.12) + API Gateway HTTP API.
 
 Parameters:
   TableName:
@@ -14,13 +14,17 @@ Parameters:
     Default: amazon.titan-embed-text-v2:0
   ChatModelId:
     Type: String
-    Default: anthropic.claude-3-sonnet-20240229-v1:0
+    Default: us.amazon.nova-micro-v1:0
   EmbeddingDimensions:
     Type: Number
     Default: 1024
   TopK:
     Type: Number
     Default: 3
+  VectorIndexName:
+    Type: String
+    Default: embedding-index
+    Description: Nome do índice vetorial (SearchVectors) da tabela DynamoDB.
 
 Globals:
   Function:
@@ -45,6 +49,15 @@ Resources:
       KeySchema:
         - AttributeName: id
           KeyType: HASH
+      # Índice vetorial nativo (exige BillingMode PAY_PER_REQUEST).
+      VectorIndexes:
+        - IndexName: !Ref VectorIndexName
+          VectorAttribute:
+            AttributeName: embedding
+          Dimensions: !Ref EmbeddingDimensions
+          DistanceFunction: COSINE
+          Projection:
+            ProjectionType: ALL
 
   # --------------------------------------------------------------------------
   # HTTP API (API Gateway v2) com CORS liberado
@@ -77,16 +90,24 @@ Resources:
           CHAT_MODEL_ID: !Ref ChatModelId
           EMBEDDING_DIMENSIONS: !Ref EmbeddingDimensions
           TOP_K: !Ref TopK
+          VECTOR_INDEX_NAME: !Ref VectorIndexName
       Policies:
-        - DynamoDBReadPolicy:
-            TableName: !Ref TableName
+        # SearchVectors é autorizado no ARN do índice vetorial.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:SearchVectors
+              Resource:
+                - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}/index/${VectorIndexName}"
         - Statement:
             - Effect: Allow
               Action:
                 - bedrock:InvokeModel
               Resource:
                 - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}"
-                - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${ChatModelId}"
+                # Perfil de inferência (prefixo us.) e os modelos de fundação que ele roteia.
+                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ChatModelId}"
+                - "arn:aws:bedrock:*::foundation-model/amazon.nova-micro-v1:0"
       Events:
         Chat:
           Type: HttpApi

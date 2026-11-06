@@ -30,5 +30,5 @@ def ch():
         import chat_handler as module
 
     module.bedrock_runtime = mock.Mock()
-    module.table = mock.Mock()
+    module.dynamodb_client = mock.Mock()
     return module

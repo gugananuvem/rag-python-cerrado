@@ -1,11 +1,11 @@
-"""
+﻿"""
 Lambda handler principal do sistema RAG Serverless.
 
 Fluxo:
     1. Recebe a pergunta do usuário (POST /chat).
     2. Gera o embedding da pergunta via Amazon Bedrock (Titan Embeddings v2).
-    3. Busca os documentos mais similares no DynamoDB (similaridade de cosseno em Python).
-    4. Monta o contexto e gera a resposta final com Claude 3 Sonnet.
+    3. Busca os documentos mais similares no DynamoDB com SearchVectors (índice vetorial nativo).
+    4. Monta o contexto e gera a resposta final com Amazon Nova Micro.
     5. Retorna a resposta + as fontes utilizadas (com score de similaridade).
 
 Destaques:
@@ -14,7 +14,6 @@ Destaques:
 """
 
 import json
-import math
 import os
 import random
 import time
@@ -22,6 +21,7 @@ from decimal import Decimal
 from typing import Any, Dict, List
 
 import boto3
+from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
 
 # ----------------------------------------------------------------------------
@@ -30,6 +30,8 @@ from botocore.exceptions import ClientError
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 TABLE_NAME = os.environ.get("TABLE_NAME", "blog-table")
+# Índice vetorial da tabela (VectorAttribute: embedding, distância COSINE).
+VECTOR_INDEX_NAME = os.environ.get("VECTOR_INDEX_NAME", "embedding-index")
 # Endpoint do DynamoDB. Deixe vazio para usar a AWS real; defina para o
 # simulador local, ex.: http://localhost:8000
 DYNAMODB_ENDPOINT = os.environ.get("DYNAMODB_ENDPOINT", "").strip() or None
@@ -38,7 +40,7 @@ DYNAMODB_ENDPOINT = os.environ.get("DYNAMODB_ENDPOINT", "").strip() or None
 AWS_PROFILE = os.environ.get("AWS_PROFILE", "").strip() or None
 EMBEDDING_MODEL_ID = os.environ.get("EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
 CHAT_MODEL_ID = os.environ.get(
-    "CHAT_MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0"
+    "CHAT_MODEL_ID", "us.amazon.nova-micro-v1:0"
 )
 EMBEDDING_DIMENSIONS = int(os.environ.get("EMBEDDING_DIMENSIONS", "1024"))
 TOP_K = int(os.environ.get("TOP_K", "3"))
@@ -71,8 +73,9 @@ CORS_HEADERS = {
 session = boto3.Session(profile_name=AWS_PROFILE) if AWS_PROFILE else boto3.Session()
 
 bedrock_runtime = session.client("bedrock-runtime", region_name=REGION)
-dynamodb = session.resource("dynamodb", region_name=REGION, endpoint_url=DYNAMODB_ENDPOINT)
-table = dynamodb.Table(TABLE_NAME)
+# SearchVectors só existe no client de baixo nível (o resource Table não expõe).
+dynamodb_client = session.client("dynamodb", region_name=REGION, endpoint_url=DYNAMODB_ENDPOINT)
+_deserializer = TypeDeserializer()
 
 
 # ----------------------------------------------------------------------------
@@ -129,7 +132,7 @@ def get_embedding(text: str) -> List[float]:
 
 
 def generate_answer(question: str, context_docs: List[Dict[str, Any]]) -> str:
-    """Gera a resposta final com Claude 3 Sonnet usando o contexto recuperado."""
+    """Gera a resposta final com Amazon Nova Micro usando o contexto recuperado."""
     context_text = "\n\n".join(
         f"[Fonte {i + 1}] {doc['title']}\n{doc['content']}"
         for i, doc in enumerate(context_docs)
@@ -148,86 +151,65 @@ def generate_answer(question: str, context_docs: List[Dict[str, Any]]) -> str:
         "Responda usando apenas as informações do contexto acima."
     )
 
-    body = json.dumps(
-        {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 1024,
-            "temperature": 0.2,
-            "system": system_prompt,
-            "messages": [
-                {"role": "user", "content": [{"type": "text", "text": user_prompt}]}
-            ],
-        }
-    )
-
     def _call():
-        return bedrock_runtime.invoke_model(
+        # API Converse: formato único para os modelos de chat do Bedrock.
+        return bedrock_runtime.converse(
             modelId=CHAT_MODEL_ID,
-            contentType="application/json",
-            accept="application/json",
-            body=body,
+            system=[{"text": system_prompt}],
+            messages=[{"role": "user", "content": [{"text": user_prompt}]}],
+            inferenceConfig={"maxTokens": 1024, "temperature": 0.2},
         )
 
     response = _invoke_with_backoff(_call)
-    payload = json.loads(response["body"].read())
-    return payload["content"][0]["text"]
+    return response["output"]["message"]["content"][0]["text"]
 
 
 # ----------------------------------------------------------------------------
-# Busca vetorial (similaridade de cosseno em Python)
+# Busca vetorial (DynamoDB SearchVectors)
 # ----------------------------------------------------------------------------
 
 
-def cosine_similarity(a: List[float], b: List[float]) -> float:
-    """Calcula a similaridade de cosseno entre dois vetores."""
-    dot = 0.0
-    norm_a = 0.0
-    norm_b = 0.0
-    for x, y in zip(a, b):
-        dot += x * y
-        norm_a += x * x
-        norm_b += y * y
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
-
-
-def _to_float_list(raw: Any) -> List[float]:
-    """Converte uma lista de Decimal (DynamoDB) para floats."""
-    return [float(v) for v in raw]
+def _to_search_vector(embedding: List[float]) -> List[Dict[str, str]]:
+    """
+    Converte o embedding para o formato do SearchVector: lista simples de
+    {"N": "<número>"} (sem o wrapper "L" usado nos atributos do item).
+    Usa notação decimal fixa para evitar expoente (ex.: 1e-05).
+    """
+    return [{"N": format(Decimal(str(v)), "f")} for v in embedding]
 
 
 def vector_search(query_embedding: List[float], top_k: int = TOP_K) -> List[Dict[str, Any]]:
     """
-    Faz um scan na tabela do DynamoDB e ranqueia os documentos pela
-    similaridade de cosseno em relação ao embedding da pergunta.
+    Consulta o índice vetorial do DynamoDB (SearchVectors) e devolve os
+    `top_k` documentos mais similares, do mais para o menos similar.
+
+    O índice usa a função de distância COSINE, em que o Score é uma distância
+    (0 = idêntico, 2 = oposto). Converte para similaridade (1 - distância)
+    para manter o campo `score` com "maior = mais similar".
     """
+
+    def _call():
+        return dynamodb_client.search_vectors(
+            TableName=TABLE_NAME,
+            IndexName=VECTOR_INDEX_NAME,
+            SearchVector=_to_search_vector(query_embedding),
+            TopK=top_k,
+        )
+
+    response = _invoke_with_backoff(_call)
+
     results: List[Dict[str, Any]] = []
-    scan_kwargs: Dict[str, Any] = {}
-
-    while True:
-        response = table.scan(**scan_kwargs)
-        for item in response.get("Items", []):
-            embedding = item.get("embedding")
-            if not embedding:
-                continue
-            score = cosine_similarity(query_embedding, _to_float_list(embedding))
-            results.append(
-                {
-                    "id": item.get("id"),
-                    "title": item.get("title", ""),
-                    "content": item.get("content", ""),
-                    "score": score,
-                }
-            )
-
-        last_key = response.get("LastEvaluatedKey")
-        if not last_key:
-            break
-        scan_kwargs["ExclusiveStartKey"] = last_key
-
-    results.sort(key=lambda d: d["score"], reverse=True)
-    return results[:top_k]
+    for hit in response.get("SearchResults", []):
+        item = {k: _deserializer.deserialize(v) for k, v in hit.get("Item", {}).items()}
+        results.append(
+            {
+                "id": item.get("id"),
+                "title": item.get("title", ""),
+                "content": item.get("content", ""),
+                "score": 1.0 - float(hit["Score"]),
+            }
+        )
+    return results
 
 
 # ----------------------------------------------------------------------------

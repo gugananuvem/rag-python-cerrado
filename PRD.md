@@ -1,6 +1,6 @@
-# Sistema RAG Serverless (DynamoDB Vector + Python + React)
+﻿# Sistema RAG Serverless (DynamoDB Vector + Python + React)
 
-Um sistema completo, de baixo custo e 100% Serverless para **Retrieval-Augmented Generation (RAG)** na AWS, utilizando **Amazon DynamoDB Vector Search**, **Amazon Bedrock (Titan Embeddings v2 + Claude 3)**, **AWS Lambda (Python 3.12)** e **React**.
+Um sistema completo, de baixo custo e 100% Serverless para **Retrieval-Augmented Generation (RAG)** na AWS, utilizando **Amazon DynamoDB Vector Search**, **Amazon Bedrock (Titan Embeddings v2 + Amazon Nova Micro)**, **AWS Lambda (Python 3.12)** e **React**.
 
 ---
 
@@ -19,7 +19,7 @@ Um sistema completo, de baixo custo e 100% Serverless para **Retrieval-Augmented
 [ AWS Lambda (Python 3.12 - chat_handler.py) ]
        ├── 1. Gera Embedding da Pergunta ──► [ Amazon Bedrock (Titan Vector v2) ]
        ├── 2. Consulta Similaridade Vetorial ──► [ Amazon DynamoDB (blog-table) ]
-       └── 3. Gera Resposta com Contexto ──► [ Amazon Bedrock (Claude 3 Sonnet) ]
+       └── 3. Gera Resposta com Contexto ──► [ Amazon Bedrock (Amazon Nova Micro) ]
 ```
 
 ---
@@ -69,7 +69,7 @@ Um sistema completo, de baixo custo e 100% Serverless para **Retrieval-Augmented
 4. **Node.js 18+** e `npm` para executar o frontend e o AWS Local Simulator.
 5. **Acesso aos modelos do Amazon Bedrock**:
    - `amazon.titan-embed-text-v2:0`
-   - `anthropic.claude-3-sonnet-20240229-v1:0`
+   - `us.amazon.nova-micro-v1:0`
 
 > 💡 Para desenvolvimento local sem provisionar o DynamoDB na AWS, veja a seção
 > [Ambiente de Desenvolvimento Local (AWS Local Simulator)](#-ambiente-de-desenvolvimento-local-aws-local-simulator).
@@ -141,7 +141,7 @@ projeto usa o **AWS Local Simulator** (`@gugananuvem/aws-local-simulator`), que
 sobe um DynamoDB local (entre outros serviços) em `http://localhost:8000`.
 
 > **Observação:** O simulador **não** emula o Amazon Bedrock. Os embeddings
-> (Titan) e a geração de respostas (Claude) continuam usando o **Bedrock real**.
+> (Titan) e a geração de respostas (Nova Micro) continuam usando o **Bedrock real**.
 > Apenas o DynamoDB roda localmente. Por isso é necessário um profile AWS válido
 > com acesso ao Bedrock (ex.: `dev`).
 
@@ -180,7 +180,29 @@ npm run simulator
 ```
 
 O DynamoDB sobe em `http://localhost:8000` e a tabela **`blog-table`** é criada
-automaticamente a partir do `aws-local-simulator.json`.
+automaticamente a partir do `aws-local-simulator.json`, já com o índice vetorial
+`embedding-index` (atributo `embedding`, 1024 dimensões, COSINE) usado pelo
+`SearchVectors`. Isso exige o simulador `>= 1.0.41`.
+
+> **Tabela local criada antes do índice:** o simulador só aplica `VectorIndexes`
+> do config na criação da tabela. Se `blog-table` já existe em
+> `.aws-local-simulator-data`, adicione o índice sem perder os itens com
+> `UpdateTable` (`VectorIndexUpdates` → `Create`, mesmo conteúdo do config) ou
+> rode `npm run simulator:reset` e popule de novo com `python seed.py`.
+
+#### Como o simulador executa a Lambda Python
+
+O API Gateway local fica em `http://localhost:4567/chat` (`POST` e `OPTIONS`, como no
+`template.yaml`) e aciona a lambda `rag-chat-handler`. Há dois modos:
+
+| Modo | Comando | Config | Uso |
+|------|---------|--------|-----|
+| Padrão | `npm start` | `aws-local-simulator.json` (`codePath: "src"`) | O simulador cria um processo Python a cada requisição e carrega o `chat_handler`. Não precisa de mais nada rodando. Cada chamada paga o custo de iniciar Python e boto3. |
+| Debug | `npm run start:debug` | `aws-local-simulator.debug.json` (`runtimeEndpoint`) | O simulador encaminha por HTTP para o `lambda_runtime_server.py` (porta 5001), que fica ativo. Suba-o pelo launch **Backend: Lambda (Python via simulador)** para parar em breakpoints. O `timeout` da lambda é 600 s para o breakpoint não estourar o tempo. |
+
+No modo padrão o profile (`AWS_PROFILE=dev`), a região e o `DYNAMODB_ENDPOINT` vêm do
+bloco `env` da lambda no `aws-local-simulator.json`. O processo usa o `python` do PATH
+(3.12). Se `runtimeEndpoint` e `codePath` aparecerem juntos, o `runtimeEndpoint` vence.
 
 Scripts auxiliares disponíveis:
 
@@ -246,8 +268,8 @@ unset DYNAMODB_ENDPOINT             # Bash
 
 1. Garantir **Python 3.12** no PATH (`python --version` → `3.12.x`). Necessário para o `sam build`.
 2. `cd backend && npm install`
-3. Confirmar que existem `aws-local-simulator.json` e `server.js` (incluídos no repo).
-4. `npm start` para subir o simulador (DynamoDB em `:8000`, tabela `blog-table` criada).
+3. Confirmar que existem `aws-local-simulator.json`, `aws-local-simulator.debug.json` e `server.js` (incluídos no repo).
+4. `npm start` para subir o simulador (DynamoDB em `:8000`, tabela `blog-table` criada, API em `:4567/chat`). Para debugar a Lambda, use `npm run start:debug` e o launch "Backend: Lambda (Python via simulador)".
 5. Definir `AWS_PROFILE=dev`, `DYNAMODB_ENDPOINT=http://localhost:8000`, `AWS_REGION=us-east-1`.
 6. `pip install -r src/requirements.txt && python seed.py` para popular a base.
 7. (Opcional, deploy real) `sam build && sam deploy --guided`.
@@ -258,6 +280,6 @@ unset DYNAMODB_ENDPOINT             # Bash
 ## 🛡️ Destaques da Implementação
 
 - **Tratamento de Throttling do Bedrock**: Tanto o `chat_handler.py` quanto o `seed.py` possuem lógica resiliente de **Exponential Backoff com Jitter** para capturar exceções `ThrottlingException` e `TooManyRequestsException`.
-- **Busca Vetorial Nativa em Python/DynamoDB**: Cálculo de similaridade de cosseno direto sobre os vetores de 1024 dimensões do Titan Embeddings v2.
+- **Busca Vetorial Nativa no DynamoDB**: o `chat_handler.py` usa a API `SearchVectors` sobre o índice vetorial `embedding-index` (COSINE, 1024 dimensões do Titan Embeddings v2). O `Score` retornado é uma distância (0 = idêntico), convertida para similaridade (`1 - distância`) na resposta. Exige boto3/botocore `>= 1.43.119` e permissão `dynamodb:SearchVectors` no ARN do índice.
 - **Transparência de Fontes**: A resposta da API inclui a lista das fontes mais relevantes do DynamoDB e seus respectivos scores de similaridade.
 - **Configuração Flexível de CORS**: A HTTP API aceita requisições do frontend React via CloudFront ou localhost.

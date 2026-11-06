@@ -5,7 +5,7 @@ Plano de implementação do sistema RAG Serverless (DynamoDB + Bedrock + Lambda 
 ## Fase 1 — Backend (RAG core)
 - [x] `chat_handler.py`: handler Lambda com o pipeline de RAG
   - [x] Geração de embedding da pergunta (Titan Embeddings v2)
-  - [x] Busca vetorial (scan no DynamoDB + similaridade de cosseno)
+  - [x] Busca vetorial (DynamoDB `SearchVectors` com índice vetorial COSINE)
   - [x] Geração da resposta com contexto (Claude 3 Sonnet)
   - [x] Exponential Backoff com Jitter para throttling do Bedrock
   - [x] Resposta com fontes + scores + CORS
@@ -43,4 +43,4 @@ Plano de implementação do sistema RAG Serverless (DynamoDB + Bedrock + Lambda 
 ## Próximos passos (fora do escopo atual)
 - [x] Deploy real na AWS (`sam build` / `sam deploy --guided`)
 - [ ] Autenticação na API (API Key / Cognito)
-- [ ] Paginação / índice para bases grandes (migrar de scan para solução escalável)
+- [x] Índice para bases grandes (scan substituído por `SearchVectors`)

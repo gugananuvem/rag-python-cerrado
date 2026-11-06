@@ -21,21 +21,18 @@
       }
     ]
   },
-  "lambda": {
-    "externalRuntime": {
-      "defaultEndpoint": "http://127.0.0.1:5001/invoke"
-    }
-  },
   "lambdas": [
     {
       "name": "rag-chat-handler",
       "runtime": "python3.12",
       "handler": "chat_handler.lambda_handler",
-      "runtimeEndpoint": "http://127.0.0.1:5001/invoke",
+      "codePath": "src",
       "timeout": 60,
       "env": {
         "TABLE_NAME": "blog-table",
-        "DYNAMODB_ENDPOINT": "http://localhost:8000"
+        "DYNAMODB_ENDPOINT": "http://localhost:8000",
+        "AWS_PROFILE": "dev",
+        "AWS_REGION": "us-east-1"
       }
     }
   ],
@@ -49,7 +46,16 @@
         "AttributeDefinitions": [
           { "AttributeName": "id", "AttributeType": "S" }
         ],
-        "BillingMode": "PAY_PER_REQUEST"
+        "BillingMode": "PAY_PER_REQUEST",
+        "VectorIndexes": [
+          {
+            "IndexName": "embedding-index",
+            "VectorAttribute": { "AttributeName": "embedding" },
+            "Dimensions": 1024,
+            "DistanceFunction": "COSINE",
+            "Projection": { "ProjectionType": "ALL" }
+          }
+        ]
       }
     ]
   }

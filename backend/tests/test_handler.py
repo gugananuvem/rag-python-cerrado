@@ -4,6 +4,14 @@ import json
 from unittest import mock
 
 
+def _hit(item_id, title, content, score):
+    """Elemento de SearchResults do DynamoDB SearchVectors (DynamoDB JSON)."""
+    return {
+        "Item": {"id": {"S": item_id}, "title": {"S": title}, "content": {"S": content}},
+        "Score": score,
+    }
+
+
 def _post(body, is_b64=False):
     return {
         "requestContext": {"http": {"method": "POST"}},
@@ -28,7 +36,7 @@ def test_missing_question_returns_400(ch):
 
 def test_empty_knowledge_base_returns_message(ch):
     ch.get_embedding = mock.Mock(return_value=[0.1, 0.2])
-    ch.table.scan.return_value = {"Items": []}
+    ch.dynamodb_client.search_vectors.return_value = {"SearchResults": []}
 
     resp = ch.lambda_handler(_post(json.dumps({"question": "oi?"})), None)
     body = json.loads(resp["body"])
@@ -40,12 +48,11 @@ def test_empty_knowledge_base_returns_message(ch):
 def test_happy_path_returns_answer_and_sources(ch, monkeypatch):
     monkeypatch.setattr(ch, "get_embedding", lambda _t: [1.0, 0.0])
     monkeypatch.setattr(ch, "generate_answer", lambda _q, _docs: "resposta final")
-    from decimal import Decimal
 
-    ch.table.scan.return_value = {
-        "Items": [
-            {"id": "p1", "title": "T1", "content": "c1", "embedding": [Decimal("1"), Decimal("0")]},
-            {"id": "p2", "title": "T2", "content": "c2", "embedding": [Decimal("0"), Decimal("1")]},
+    ch.dynamodb_client.search_vectors.return_value = {
+        "SearchResults": [
+            _hit("p1", "T1", "c1", 0.0),
+            _hit("p2", "T2", "c2", 1.0),
         ]
     }
 
@@ -61,11 +68,8 @@ def test_happy_path_returns_answer_and_sources(ch, monkeypatch):
 def test_accepts_message_field_alias(ch, monkeypatch):
     monkeypatch.setattr(ch, "get_embedding", lambda _t: [1.0, 0.0])
     monkeypatch.setattr(ch, "generate_answer", lambda _q, _docs: "ok")
-    from decimal import Decimal
 
-    ch.table.scan.return_value = {
-        "Items": [{"id": "p1", "title": "T1", "content": "c1", "embedding": [Decimal("1")]}]
-    }
+    ch.dynamodb_client.search_vectors.return_value = {"SearchResults": [_hit("p1", "T1", "c1", 0.0)]}
 
     resp = ch.lambda_handler(_post(json.dumps({"message": "usando alias"})), None)
     assert resp["statusCode"] == 200
@@ -76,11 +80,8 @@ def test_base64_encoded_body(ch, monkeypatch):
 
     monkeypatch.setattr(ch, "get_embedding", lambda _t: [1.0])
     monkeypatch.setattr(ch, "generate_answer", lambda _q, _docs: "ok")
-    from decimal import Decimal
 
-    ch.table.scan.return_value = {
-        "Items": [{"id": "p1", "title": "T1", "content": "c1", "embedding": [Decimal("1")]}]
-    }
+    ch.dynamodb_client.search_vectors.return_value = {"SearchResults": [_hit("p1", "T1", "c1", 0.0)]}
 
     raw = base64.b64encode(json.dumps({"question": "x"}).encode()).decode()
     resp = ch.lambda_handler(_post(raw, is_b64=True), None)
