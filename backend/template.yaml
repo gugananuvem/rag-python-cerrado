@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Sistema RAG Serverless com DynamoDB Vector, Amazon Bedrock e Python 3.12.
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    LoggingConfig:
+      LogFormat: JSON
+
+Resources:
+  # Tabela DynamoDB com Single Table Design
+  BlogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: blog-table
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  # HTTP API Gateway com CORS
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Name: RagServerlessApi
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowHeaders:
+          - "Content-Type"
+          - "Authorization"
+          - "X-Amz-Date"
+          - "X-Api-Key"
+          - "X-Amz-Security-Token"
+        AllowMethods:
+          - "POST"
+          - "OPTIONS"
+
+  # Função Lambda do Backend RAG
+  ChatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: chat_handler.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref BlogTable
+          BEDROCK_EMBEDDING_MODEL: amazon.titan-embed-text-v2:0
+          BEDROCK_CLAUDE_MODEL: anthropic.claude-3-sonnet-20240229-v1:0
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlogTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: "*"
+      Events:
+        ChatEndpoint:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /chat
+            Method: POST
+
+Outputs:
+  ApiEndpoint:
+    Description: "URL do Endpoint HTTP API Gateway para a função de Chat"
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/chat"
+  BlogTableName:
+    Description: "Nome da Tabela DynamoDB Criada"
+    Value: !Ref BlogTable
